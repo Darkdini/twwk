@@ -14,3 +14,6 @@ server/apk_patch/tools/
 server/captures/*/
 __pycache__/
 *.pyc
+
+# J2ME референс-клиент (декомпилированный сторонний код)
+j2me/
