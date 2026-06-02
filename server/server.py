@@ -117,10 +117,8 @@ async def login_handle(reader, writer, s2c_bytes, pace):
     # Фоновый разбор того, что шлёт клиент.
     client_task = asyncio.create_task(login_log_client(reader))
 
-    # Верный побайтовый реплей записанного S->C (начинается с рукопожатия
-    # 56 15, затем хост-лист, экран загрузки и форма логина).
-    print(f"[login] стримлю {len(s2c_bytes)} байт записанного S->C "
-          f"(рукопожатие + экран логина)...")
+    # Реплей записанного S->C (начинается с рукопожатия 56 15).
+    print(f"[login] стримлю {len(s2c_bytes)} байт записанного S->C...")
     CHUNK = 1024
     try:
         for i in range(0, len(s2c_bytes), CHUNK):
@@ -128,9 +126,15 @@ async def login_handle(reader, writer, s2c_bytes, pace):
             await writer.drain()
             if pace:
                 await asyncio.sleep(pace)
-        print("[login] весь записанный S->C отправлен; держу соединение открытым")
+        print("[login] поток отправлен; держу соединение + keepalive 0xFF")
+        # 0xFF клиент трактует как sentinel (нет сообщения) -> безопасный
+        # серверный keepalive, не даёт соединению «умереть» и уйти в реконнект.
+        while not client_task.done():
+            writer.write(b"\xff")
+            await writer.drain()
+            await asyncio.sleep(5)
     except (ConnectionResetError, BrokenPipeError, ConnectionError):
-        print(f"[login] {peer} закрыл соединение во время стрима")
+        print(f"[login] {peer} закрыл соединение")
     await client_task
     try:
         writer.close()
@@ -180,7 +184,7 @@ async def login_main(args):
     s2c_path = os.path.join(args.session, "s2c.bin")
     s2c_bytes = open(s2c_path, "rb").read()
     s2c_bytes, dropped, truncated = process_s2c(
-        s2c_bytes, strip_hosts=not args.keep_hosts, login_only=not args.full)
+        s2c_bytes, strip_hosts=not args.keep_hosts, login_only=args.login_only)
     print(f"[login] хост-лист убрано: {dropped}; "
           f"обрезано до логин-экрана: {truncated}")
     host, port = args.listen.rsplit(":", 1)
@@ -393,9 +397,9 @@ def main():
     lg.add_argument("--keep-hosts", action="store_true",
                     help="НЕ вырезать хост-лист (по умолчанию вырезается, чтобы "
                          "клиент не ушёл на реальный сервер)")
-    lg.add_argument("--full", action="store_true",
-                    help="слать весь сеанс (по умолчанию — только логин-экран, "
-                         "обрезка на главном экране LinkScr, чтобы не мигало)")
+    lg.add_argument("--login-only", action="store_true",
+                    help="обрезать на главном экране (LinkScr). По умолчанию шлём "
+                         "весь поток — иначе шкала загрузки не доходит")
 
     args = ap.parse_args()
     coro = {"replay": replay_main, "serve": serve_main,
