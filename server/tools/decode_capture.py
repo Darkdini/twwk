@@ -21,10 +21,31 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from twwk import proto  # noqa: E402
+from twwk import opcodes  # noqa: E402
+
+
+def as_message(payload: bytes):
+    """
+    Кадр канала сообщений = [srcId:int32 BE][opcode:int32 BE][body].
+    Если opcode распознан — вернуть подпись, иначе None.
+    """
+    if len(payload) < 8:
+        return None
+    src = int.from_bytes(payload[0:4], "big", signed=True)
+    op = int.from_bytes(payload[4:8], "big", signed=True)
+    names = opcodes.OPCODE_TO_NAMES.get(op)
+    if not names:
+        return None
+    name = "|".join(dict.fromkeys(names))
+    body = payload[8:]
+    return f"MSG src={src} op={name}  body[{len(body)}]={body.hex()}"
 
 
 def guess_payload(payload: bytes) -> str:
-    """Эвристика: пробуем прочитать тело как varint'ы / строки для подсказки."""
+    """Эвристика: распознать сообщение по опкоду, иначе varint'ы / строки."""
+    msg = as_message(payload)
+    if msg:
+        return msg
     if not payload:
         return "(empty)"
     out = []

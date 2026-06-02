@@ -35,6 +35,9 @@ cp "$HERE/smali/z/"*.smali "$WORK/smali/z/"
 echo "[*] Патч J/a.smali (обёртка потоков сокета)..."
 python3 "$HERE/patch_ja.py" "$WORK/smali/J/a.smali"
 
+echo "[*] Патч i/i.smali (семантический лог опкодов)..."
+python3 "$HERE/patch_ii.py" "$WORK/smali/i/i.smali"
+
 echo "[*] Сборка APK..."
 OUT_UNSIGNED="$HERE/patched-unsigned.apk"
 java -jar "$TOOLS/apktool.jar" b "$WORK" -o "$OUT_UNSIGNED"
