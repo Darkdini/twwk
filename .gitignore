@@ -1,0 +1,8 @@
+# Рабочие артефакты реверса (не коммитим)
+extracted/
+decompiled/
+
+# Записанные сессии прокси
+server/captures/*/
+__pycache__/
+*.pyc
