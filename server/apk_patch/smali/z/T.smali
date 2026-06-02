@@ -3,9 +3,11 @@
 .source "T.java"
 
 
-# Логгер сетевого трафика. Пишет в приватный каталог приложения
-# (getExternalFilesDir) файл twwk_dump.bin без доп. разрешений.
-# Формат записи: [1 байт dir: 'S'=от сервера / 'C'=к серверу][4 байта BE длина][данные].
+# Логгер сетевого трафика. Пишет в публичную папку Downloads/twwk через
+# MediaStore (Android 10+, без разрешений); на старых версиях — в приватный
+# каталог приложения.
+#   twwk_dump_<ts>.bin : [1 байт dir 'S'/'C'][4 байта BE длина][данные]
+#   twwk_msg_<ts>.txt  : разобранные сообщения s=<srcId> op=<opcode> body=<class>
 
 
 .field public static s:Ljava/io/OutputStream;
@@ -34,32 +36,73 @@
 .end method
 
 
-# Лениво открыть файл дампа (когда Activity уже создана).
-.method public static init()V
-    .locals 5
+# Открыть выходной поток для файла p0 в Downloads/twwk (или приватно).
+.method public static open(Ljava/lang/String;)Ljava/io/OutputStream;
+    .locals 6
 
     :try_start_0
-    sget-object v0, Lz/T;->s:Ljava/io/OutputStream;
-
-    if-nez v0, :done
-
     sget-object v0, Lstart/browser/gameTWWK/MiniBrowserActivity;->m:Lstart/browser/gameTWWK/MiniBrowserActivity;
 
-    if-eqz v0, :done
+    if-eqz v0, :fail
 
+    sget v1, Landroid/os/Build$VERSION;->SDK_INT:I
+
+    const/16 v2, 0x1d
+
+    if-lt v1, v2, :legacy
+
+    # --- MediaStore (API 29+): Downloads/twwk ---
+    invoke-virtual {v0}, Lstart/browser/gameTWWK/MiniBrowserActivity;->getContentResolver()Landroid/content/ContentResolver;
+
+    move-result-object v0
+
+    new-instance v1, Landroid/content/ContentValues;
+
+    invoke-direct {v1}, Landroid/content/ContentValues;-><init>()V
+
+    const-string v2, "_display_name"
+
+    invoke-virtual {v1, v2, p0}, Landroid/content/ContentValues;->put(Ljava/lang/String;Ljava/lang/String;)V
+
+    const-string v2, "mime_type"
+
+    const-string v3, "application/octet-stream"
+
+    invoke-virtual {v1, v2, v3}, Landroid/content/ContentValues;->put(Ljava/lang/String;Ljava/lang/String;)V
+
+    const-string v2, "relative_path"
+
+    const-string v3, "Download/twwk"
+
+    invoke-virtual {v1, v2, v3}, Landroid/content/ContentValues;->put(Ljava/lang/String;Ljava/lang/String;)V
+
+    sget-object v2, Landroid/provider/MediaStore$Downloads;->EXTERNAL_CONTENT_URI:Landroid/net/Uri;
+
+    invoke-virtual {v0, v2, v1}, Landroid/content/ContentResolver;->insert(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;
+
+    move-result-object v1
+
+    if-eqz v1, :fail
+
+    invoke-virtual {v0, v1}, Landroid/content/ContentResolver;->openOutputStream(Landroid/net/Uri;)Ljava/io/OutputStream;
+
+    move-result-object v0
+
+    return-object v0
+
+    :legacy
+    # --- API < 29: приватный внешний каталог ---
     const/4 v1, 0x0
 
     invoke-virtual {v0, v1}, Lstart/browser/gameTWWK/MiniBrowserActivity;->getExternalFilesDir(Ljava/lang/String;)Ljava/io/File;
 
     move-result-object v0
 
-    if-eqz v0, :done
+    if-eqz v0, :fail
 
     new-instance v1, Ljava/io/File;
 
-    const-string v2, "twwk_dump.bin"
-
-    invoke-direct {v1, v0, v2}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
+    invoke-direct {v1, v0, p0}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
 
     new-instance v0, Ljava/io/FileOutputStream;
 
@@ -67,7 +110,108 @@
 
     invoke-direct {v0, v1, v2}, Ljava/io/FileOutputStream;-><init>(Ljava/io/File;Z)V
 
+    return-object v0
+    :try_end_0
+    .catch Ljava/lang/Throwable; {:try_start_0 .. :try_end_0} :catch_0
+
+    :fail
+    const/4 v0, 0x0
+
+    return-object v0
+
+    :catch_0
+    move-exception v0
+
+    const/4 v0, 0x0
+
+    return-object v0
+.end method
+
+
+# Имя файла с меткой времени: <prefix><millis><suffix>.
+.method public static fname(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+    .locals 3
+
+    new-instance v0, Ljava/lang/StringBuilder;
+
+    invoke-direct {v0}, Ljava/lang/StringBuilder;-><init>()V
+
+    invoke-virtual {v0, p0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    invoke-static {}, Ljava/lang/System;->currentTimeMillis()J
+
+    move-result-wide v1
+
+    invoke-virtual {v0, v1, v2}, Ljava/lang/StringBuilder;->append(J)Ljava/lang/StringBuilder;
+
+    invoke-virtual {v0, p1}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v0
+
+    return-object v0
+.end method
+
+
+# Лениво открыть бинарный лог трафика.
+.method public static init()V
+    .locals 2
+
+    :try_start_0
+    sget-object v0, Lz/T;->s:Ljava/io/OutputStream;
+
+    if-nez v0, :done
+
+    const-string v0, "twwk_dump_"
+
+    const-string v1, ".bin"
+
+    invoke-static {v0, v1}, Lz/T;->fname(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-static {v0}, Lz/T;->open(Ljava/lang/String;)Ljava/io/OutputStream;
+
+    move-result-object v0
+
     sput-object v0, Lz/T;->s:Ljava/io/OutputStream;
+
+    :done
+    :try_end_0
+    .catch Ljava/lang/Throwable; {:try_start_0 .. :try_end_0} :catch_0
+
+    return-void
+
+    :catch_0
+    move-exception v0
+
+    return-void
+.end method
+
+
+# Лениво открыть текстовый лог сообщений.
+.method public static tinit()V
+    .locals 2
+
+    :try_start_0
+    sget-object v0, Lz/T;->t:Ljava/io/OutputStream;
+
+    if-nez v0, :done
+
+    const-string v0, "twwk_msg_"
+
+    const-string v1, ".txt"
+
+    invoke-static {v0, v1}, Lz/T;->fname(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+
+    move-result-object v0
+
+    invoke-static {v0}, Lz/T;->open(Ljava/lang/String;)Ljava/io/OutputStream;
+
+    move-result-object v0
+
+    sput-object v0, Lz/T;->t:Ljava/io/OutputStream;
 
     :done
     :try_end_0
@@ -154,54 +298,6 @@
 
     :out
     monitor-exit v0
-
-    return-void
-.end method
-
-
-# Лениво открыть текстовый лог сообщений.
-.method public static tinit()V
-    .locals 5
-
-    :try_start_0
-    sget-object v0, Lz/T;->t:Ljava/io/OutputStream;
-
-    if-nez v0, :done
-
-    sget-object v0, Lstart/browser/gameTWWK/MiniBrowserActivity;->m:Lstart/browser/gameTWWK/MiniBrowserActivity;
-
-    if-eqz v0, :done
-
-    const/4 v1, 0x0
-
-    invoke-virtual {v0, v1}, Lstart/browser/gameTWWK/MiniBrowserActivity;->getExternalFilesDir(Ljava/lang/String;)Ljava/io/File;
-
-    move-result-object v0
-
-    if-eqz v0, :done
-
-    new-instance v1, Ljava/io/File;
-
-    const-string v2, "twwk_msg.txt"
-
-    invoke-direct {v1, v0, v2}, Ljava/io/File;-><init>(Ljava/io/File;Ljava/lang/String;)V
-
-    new-instance v0, Ljava/io/FileOutputStream;
-
-    const/4 v2, 0x1
-
-    invoke-direct {v0, v1, v2}, Ljava/io/FileOutputStream;-><init>(Ljava/io/File;Z)V
-
-    sput-object v0, Lz/T;->t:Ljava/io/OutputStream;
-
-    :done
-    :try_end_0
-    .catch Ljava/lang/Throwable; {:try_start_0 .. :try_end_0} :catch_0
-
-    return-void
-
-    :catch_0
-    move-exception v0
 
     return-void
 .end method

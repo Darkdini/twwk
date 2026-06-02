@@ -24,10 +24,14 @@
 
 ## Куда пишется
 
+Публичная папка **Загрузки** (через MediaStore, без разрешений на Android 10+):
 ```
-/sdcard/Android/data/start.browser.gameTWWK/files/twwk_dump.bin   # сырой трафик
-/sdcard/Android/data/start.browser.gameTWWK/files/twwk_msg.txt    # разобранные сообщения
+/sdcard/Download/twwk/twwk_dump_<ts>.bin   # сырой трафик
+/sdcard/Download/twwk/twwk_msg_<ts>.txt    # разобранные сообщения
 ```
+На Android 9 и старше — приватный каталог приложения
+(`Android/data/start.browser.gameTWWK/files/`). Имена с меткой времени —
+каждый запуск создаёт новый файл.
 
 ## Установка на телефон
 
