@@ -13,21 +13,23 @@ cd twwk
 git checkout claude/client-handshake-recording-Ax86r
 ```
 
-## 2. Подготовить сессию из своего дампа
-Дамп лежит в `Download/twwk/twwk_dump_*.bin` (или возьми с ветки `main`).
-Дай Termux доступ к хранилищу и сконвертируй дамп в сессию:
-```bash
-termux-setup-storage
-python3 server/tools/import_dump.py \
-  ~/storage/downloads/twwk/twwk_dump_*.bin \
-  -o server/captures/reg1
-```
-
-## 3. Запустить сервер (режим login)
+## 2. Запустить сервер (режим login)
+Готовая сессия уже лежит в репо (`server/replay_session/s2c.bin`),
+конвертировать дамп НЕ нужно:
 ```bash
 cd server
-python3 server.py login --session captures/reg1 --listen 127.0.0.1:5005
+python3 server.py login --session replay_session --listen 127.0.0.1:5005
 ```
+Должно написать `S->C=11766230 байт` (не 0!). Если 0 — значит не сделал
+`git pull` свежей ветки.
+
+> Хочешь сделать сессию из своего нового дампа — тогда:
+> ```bash
+> termux-setup-storage
+> python3 tools/import_dump.py <путь к одному twwk_dump_XXXX.bin> -o captures/my
+> python3 server.py login --session captures/my --listen 127.0.0.1:5005
+> ```
+> Указывай ОДИН конкретный файл (не маску `*.bin`).
 Сервер ответит на рукопожатие и проиграет записанный экран логина, а в консоли
 будет видно, что шлёт клиент (`<- C ... op=value «...»`).
 
