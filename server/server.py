@@ -139,9 +139,40 @@ async def login_handle(reader, writer, s2c_bytes, pace):
     print(f"[login] {peer} отключился")
 
 
+def strip_host_frames(s2c: bytes):
+    """
+    Удаляет из записанного S->C кадры с хост-листом (NWHOST,
+    socket://mmog…:5005), чтобы клиент не перезаписал список серверов и не
+    ушёл на реальный сервер. Возвращает (отфильтрованные байты, сколько убрано).
+    """
+    pats = [b"\x00\x35\x00\x30\x00\x30\x00\x35",          # "5005" UTF-16BE
+            b"\x00\x73\x00\x6f\x00\x63\x00\x6b\x00\x65"]   # "socke" UTF-16BE
+    r = proto.ByteReader(s2c)
+    out = bytearray(r.read(2))   # рукопожатие 56 15
+    dropped = 0
+    while r.remaining() > 0:
+        start = r.pos
+        try:
+            fr = proto.try_read_frame(r)
+        except ValueError:
+            out += s2c[start:]
+            break
+        if fr is None:
+            out += s2c[start:]
+            break
+        if any(p in fr.payload for p in pats):
+            dropped += 1
+            continue
+        out += fr.raw
+    return bytes(out), dropped
+
+
 async def login_main(args):
     s2c_path = os.path.join(args.session, "s2c.bin")
     s2c_bytes = open(s2c_path, "rb").read()
+    if not args.keep_hosts:
+        s2c_bytes, dropped = strip_host_frames(s2c_bytes)
+        print(f"[login] вырезано хост-лист кадров (NWHOST): {dropped}")
     host, port = args.listen.rsplit(":", 1)
     server = await asyncio.start_server(
         lambda r, w: login_handle(r, w, s2c_bytes, args.pace),
@@ -349,6 +380,9 @@ def main():
     lg.add_argument("--listen", default="0.0.0.0:5005")
     lg.add_argument("--pace", type=float, default=0.0,
                     help="пауза (сек) между чанками S->C, по умолчанию без пауз")
+    lg.add_argument("--keep-hosts", action="store_true",
+                    help="НЕ вырезать хост-лист (по умолчанию вырезается, чтобы "
+                         "клиент не ушёл на реальный сервер)")
 
     args = ap.parse_args()
     coro = {"replay": replay_main, "serve": serve_main,
