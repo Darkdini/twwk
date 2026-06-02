@@ -19,7 +19,12 @@ TWWK сервер — заготовка ("наш сервер").
      расшифровывая входящие C->S (опкоды + строки). Самый быстрый способ
      «оживить» клиент до формы логина на нашем сервере.
 
+  4. play    — lockstep-реплей: S->C кадры отдаются в темпе запросов клиента
+     (ждёт, пока клиент пришлёт столько же сообщений, сколько было в записи
+     перед этим кадром). Не «убегает» (нет слайд-шоу) и не застревает.
+
 Запуск:
+  python3 server.py play   --session replay_session --listen 0.0.0.0:5005
   python3 server.py login  --session captures/<session> --listen 0.0.0.0:5005
   python3 server.py replay --session captures/<session> [--realtime]
   python3 server.py serve  --listen 0.0.0.0:5005 --version 56 --flags 0
@@ -72,7 +77,118 @@ def describe_frame(frame: "proto.Frame") -> str:
 
 
 # --------------------------------------------------------------------------
-# Режим LOGIN — верный (побайтовый) реплей старта до экрана логина
+# Режим PLAY — lockstep-реплей: S->C кадры отдаются в темпе клиента
+# --------------------------------------------------------------------------
+
+def load_play(session_dir: str):
+    """Возвращает (handshake_bytes, [(frame_raw, req_count, is_host), ...])."""
+    d = open(os.path.join(session_dir, "s2c.bin"), "rb").read()
+    r = proto.ByteReader(d)
+    hs = r.read(2)
+    raws = []
+    while r.remaining() > 0:
+        fr = proto.try_read_frame(r)
+        if fr is None:
+            break
+        is_host = any(p in fr.payload for p in HOST_PATS)
+        raws.append((fr.raw, is_host))
+    req = json.load(open(os.path.join(session_dir, "req.json")))
+    n = min(len(raws), len(req))
+    return hs, [(raws[i][0], req[i], raws[i][1]) for i in range(n)]
+
+
+async def play_handle(reader, writer, handshake, frames, args):
+    peer = writer.get_extra_info("peername")
+    print(f"\n[play] client connected: {peer}")
+    try:
+        hello = await reader.readexactly(2)
+    except asyncio.IncompleteReadError:
+        return
+    print(f"[play] HELLO={hello.hex()} -> отвечаю {handshake.hex()}")
+    writer.write(handshake)
+    await writer.drain()
+
+    state = {"recv": 0}   # сколько кадров прислал живой клиент
+
+    async def client_reader():
+        buf = bytearray()
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                buf += data
+                while buf:
+                    if buf[0] == 0xFF:
+                        del buf[:1]
+                        continue
+                    rr = proto.ByteReader(bytes(buf))
+                    try:
+                        fr = proto.try_read_frame(rr)
+                    except ValueError:
+                        del buf[:1]
+                        continue
+                    if fr is None:
+                        break
+                    state["recv"] += 1
+                    print(f"  <- C[{state['recv']}] " + describe_frame(fr))
+                    del buf[:rr.pos]
+        except (asyncio.IncompleteReadError, ConnectionResetError):
+            pass
+
+    ctask = asyncio.create_task(client_reader())
+
+    sent = skipped = 0
+    try:
+        for raw, req, is_host in frames:
+            # lockstep: ждём, пока клиент догонит (или таймаут)
+            waited = 0.0
+            while state["recv"] < req and not ctask.done():
+                await asyncio.sleep(0.02)
+                waited += 0.02
+                if waited >= args.timeout:
+                    break
+            if ctask.done():
+                break
+            if is_host and not args.keep_hosts:
+                skipped += 1
+                continue
+            writer.write(raw)
+            await writer.drain()
+            sent += 1
+        print(f"[play] отдано {sent} кадров (хост-пропущено {skipped}); "
+              f"клиент прислал {state['recv']}. keepalive...")
+        while not ctask.done():
+            writer.write(b"\xff")
+            await writer.drain()
+            await asyncio.sleep(5)
+    except (ConnectionResetError, BrokenPipeError, ConnectionError):
+        print(f"[play] {peer} разорвал соединение (отдано {sent})")
+    await ctask
+    try:
+        writer.close()
+    except Exception:
+        pass
+    print(f"[play] {peer} отключился")
+
+
+async def play_main(args):
+    handshake, frames = load_play(args.session)
+    host, port = args.listen.rsplit(":", 1)
+    server = await asyncio.start_server(
+        lambda r, w: play_handle(r, w, handshake, frames, args),
+        host, int(port),
+    )
+    print(f"[play] listening on {args.listen}")
+    print(f"[play] session={args.session}  кадров S->C={len(frames)}  "
+          f"timeout={args.timeout}s")
+    print("[play] lockstep: ответы отдаются в темпе запросов клиента")
+    async with server:
+        await server.serve_forever()
+
+
+# --------------------------------------------------------------------------
+# Режим LOGIN — простой потоковый реплей (старый)
 # --------------------------------------------------------------------------
 
 async def login_log_client(reader):
@@ -401,9 +517,17 @@ def main():
                     help="обрезать на главном экране (LinkScr). По умолчанию шлём "
                          "весь поток — иначе шкала загрузки не доходит")
 
+    pl = sub.add_parser("play", help="lockstep-реплей в темпе клиента (лучший)")
+    pl.add_argument("--session", required=True, help="папка с s2c.bin и req.json")
+    pl.add_argument("--listen", default="0.0.0.0:5005")
+    pl.add_argument("--timeout", type=float, default=8.0,
+                    help="макс ожидание запроса клиента перед след. кадром (сек)")
+    pl.add_argument("--keep-hosts", action="store_true",
+                    help="НЕ вырезать хост-лист (по умолчанию вырезается)")
+
     args = ap.parse_args()
     coro = {"replay": replay_main, "serve": serve_main,
-            "login": login_main}[args.mode](args)
+            "login": login_main, "play": play_main}[args.mode](args)
     try:
         asyncio.run(coro)
     except KeyboardInterrupt:
