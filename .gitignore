@@ -1,6 +1,14 @@
 # Рабочие артефакты реверса (не коммитим)
 extracted/
 decompiled/
+app/
+
+# APK и подписи
+*.apk
+*.idsig
+signed/
+server/apk_patch/work/
+server/apk_patch/tools/
 
 # Записанные сессии прокси
 server/captures/*/
