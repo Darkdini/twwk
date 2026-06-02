@@ -139,17 +139,23 @@ async def login_handle(reader, writer, s2c_bytes, pace):
     print(f"[login] {peer} отключился")
 
 
-def strip_host_frames(s2c: bytes):
+HOST_PATS = [b"\x00\x35\x00\x30\x00\x30\x00\x35",          # "5005" UTF-16BE
+             b"\x00\x73\x00\x6f\x00\x63\x00\x6b\x00\x65"]   # "socke" UTF-16BE
+MAIN_SCREEN = b"\x00L\x00i\x00n\x00k\x00S\x00c\x00r"        # "LinkScr" UTF-16BE
+
+
+def process_s2c(s2c: bytes, strip_hosts=True, login_only=True):
     """
-    Удаляет из записанного S->C кадры с хост-листом (NWHOST,
-    socket://mmog…:5005), чтобы клиент не перезаписал список серверов и не
-    ушёл на реальный сервер. Возвращает (отфильтрованные байты, сколько убрано).
+    Готовит поток S->C для реплея:
+      - strip_hosts: убирает кадр хост-листа (NWHOST), чтобы клиент остался у нас;
+      - login_only: обрывает поток на кадре главного экрана (LinkScr), оставляя
+        только логин-экран — иначе клиент рендерит весь сеанс и «мигает».
+    Возвращает (байты, сколько убрано хост-кадров, обрезано ли на LinkScr).
     """
-    pats = [b"\x00\x35\x00\x30\x00\x30\x00\x35",          # "5005" UTF-16BE
-            b"\x00\x73\x00\x6f\x00\x63\x00\x6b\x00\x65"]   # "socke" UTF-16BE
     r = proto.ByteReader(s2c)
     out = bytearray(r.read(2))   # рукопожатие 56 15
     dropped = 0
+    truncated = False
     while r.remaining() > 0:
         start = r.pos
         try:
@@ -160,19 +166,23 @@ def strip_host_frames(s2c: bytes):
         if fr is None:
             out += s2c[start:]
             break
-        if any(p in fr.payload for p in pats):
+        if login_only and MAIN_SCREEN in fr.payload:
+            truncated = True
+            break
+        if strip_hosts and any(p in fr.payload for p in HOST_PATS):
             dropped += 1
             continue
         out += fr.raw
-    return bytes(out), dropped
+    return bytes(out), dropped, truncated
 
 
 async def login_main(args):
     s2c_path = os.path.join(args.session, "s2c.bin")
     s2c_bytes = open(s2c_path, "rb").read()
-    if not args.keep_hosts:
-        s2c_bytes, dropped = strip_host_frames(s2c_bytes)
-        print(f"[login] вырезано хост-лист кадров (NWHOST): {dropped}")
+    s2c_bytes, dropped, truncated = process_s2c(
+        s2c_bytes, strip_hosts=not args.keep_hosts, login_only=not args.full)
+    print(f"[login] хост-лист убрано: {dropped}; "
+          f"обрезано до логин-экрана: {truncated}")
     host, port = args.listen.rsplit(":", 1)
     server = await asyncio.start_server(
         lambda r, w: login_handle(r, w, s2c_bytes, args.pace),
@@ -383,6 +393,9 @@ def main():
     lg.add_argument("--keep-hosts", action="store_true",
                     help="НЕ вырезать хост-лист (по умолчанию вырезается, чтобы "
                          "клиент не ушёл на реальный сервер)")
+    lg.add_argument("--full", action="store_true",
+                    help="слать весь сеанс (по умолчанию — только логин-экран, "
+                         "обрезка на главном экране LinkScr, чтобы не мигало)")
 
     args = ap.parse_args()
     coro = {"replay": replay_main, "serve": serve_main,
