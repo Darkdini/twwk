@@ -14,7 +14,13 @@ TWWK сервер — заготовка ("наш сервер").
      дальше диспетчеризует входящие кадры по типам в обработчики. Сюда
      постепенно переносится логика, разобранная по записям.
 
+  3. login   — верный (побайтовый) реплей записанного S->C: отвечает на
+     рукопожатие и шлёт точные байты сервера до экрана логина, попутно
+     расшифровывая входящие C->S (опкоды + строки). Самый быстрый способ
+     «оживить» клиент до формы логина на нашем сервере.
+
 Запуск:
+  python3 server.py login  --session captures/<session> --listen 0.0.0.0:5005
   python3 server.py replay --session captures/<session> [--realtime]
   python3 server.py serve  --listen 0.0.0.0:5005 --version 56 --flags 0
 """
@@ -30,6 +36,122 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from twwk import proto  # noqa: E402
+from twwk import opcodes  # noqa: E402
+
+
+def _strings16(b: bytes, mn: int = 3):
+    """Извлечь UTF-16BE строки (ASCII/латиница/кириллица) из payload."""
+    out, cur, i, n = [], [], 0, len(b)
+    while i + 1 < n:
+        cp = (b[i] << 8) | b[i + 1]
+        if (32 <= cp < 127) or (0x400 <= cp <= 0x4FF):
+            cur.append(chr(cp)); i += 2
+        else:
+            if len(cur) >= mn:
+                out.append("".join(cur))
+            cur = []; i += 1
+    if len(cur) >= mn:
+        out.append("".join(cur))
+    return out
+
+
+def describe_frame(frame: "proto.Frame") -> str:
+    """Человекочитаемое описание входящего кадра: опкод + строки."""
+    p = frame.payload
+    op = ""
+    if len(p) >= 8:
+        src = int.from_bytes(p[0:4], "big", signed=True)
+        opc = int.from_bytes(p[4:8], "big", signed=True)
+        on = opcodes.OPCODE_TO_NAMES.get(opc)
+        sn = opcodes.OPCODE_TO_NAMES.get(src)
+        op = (f" src={'|'.join(dict.fromkeys(sn)) if sn else src}"
+              f" op={'|'.join(dict.fromkeys(on)) if on else opc}")
+    ss = _strings16(p)
+    txt = ("  «" + " | ".join(ss[:6]) + "»") if ss else ""
+    return f"type={frame.msg_type} len={len(p)}{op}{txt}"
+
+
+# --------------------------------------------------------------------------
+# Режим LOGIN — верный (побайтовый) реплей старта до экрана логина
+# --------------------------------------------------------------------------
+
+async def login_log_client(reader):
+    """Читает и печатает входящие C->S кадры с расшифровкой."""
+    buf = bytearray()
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            buf += data
+            while buf:
+                if buf[0] == 0xFF:
+                    print("  <- C keepalive (0xFF)")
+                    del buf[:1]
+                    continue
+                r = proto.ByteReader(bytes(buf))
+                try:
+                    frame = proto.try_read_frame(r)
+                except ValueError:
+                    del buf[:1]
+                    continue
+                if frame is None:
+                    break
+                print("  <- C " + describe_frame(frame))
+                del buf[:r.pos]
+    except (asyncio.IncompleteReadError, ConnectionResetError):
+        pass
+
+
+async def login_handle(reader, writer, s2c_bytes, pace):
+    peer = writer.get_extra_info("peername")
+    print(f"\n[login] client connected: {peer}")
+    try:
+        hello = await reader.readexactly(2)
+    except asyncio.IncompleteReadError:
+        return
+    print(f"[login] client HELLO = {hello.hex()}")
+    if hello != proto.HELLO:
+        print(f"[login] WARN: ждали 38 0f, получили {hello.hex()}")
+
+    # Фоновый разбор того, что шлёт клиент.
+    client_task = asyncio.create_task(login_log_client(reader))
+
+    # Верный побайтовый реплей записанного S->C (начинается с рукопожатия
+    # 56 15, затем хост-лист, экран загрузки и форма логина).
+    print(f"[login] стримлю {len(s2c_bytes)} байт записанного S->C "
+          f"(рукопожатие + экран логина)...")
+    CHUNK = 1024
+    try:
+        for i in range(0, len(s2c_bytes), CHUNK):
+            writer.write(s2c_bytes[i:i + CHUNK])
+            await writer.drain()
+            if pace:
+                await asyncio.sleep(pace)
+        print("[login] весь записанный S->C отправлен; держу соединение открытым")
+    except (ConnectionResetError, BrokenPipeError, ConnectionError):
+        print(f"[login] {peer} закрыл соединение во время стрима")
+    await client_task
+    try:
+        writer.close()
+    except Exception:
+        pass
+    print(f"[login] {peer} отключился")
+
+
+async def login_main(args):
+    s2c_path = os.path.join(args.session, "s2c.bin")
+    s2c_bytes = open(s2c_path, "rb").read()
+    host, port = args.listen.rsplit(":", 1)
+    server = await asyncio.start_server(
+        lambda r, w: login_handle(r, w, s2c_bytes, args.pace),
+        host, int(port),
+    )
+    print(f"[login] listening on {args.listen}")
+    print(f"[login] session={args.session}  S->C={len(s2c_bytes)} байт")
+    print("[login] наведи клиент (conect.conf -> этот хост:порт) и заходи")
+    async with server:
+        await server.serve_forever()
 
 
 # --------------------------------------------------------------------------
@@ -222,8 +344,15 @@ def main():
     sv.add_argument("--version", type=int, default=proto.MAX_VERSION)
     sv.add_argument("--flags", type=int, default=0)
 
+    lg = sub.add_parser("login", help="верный реплей старта до экрана логина")
+    lg.add_argument("--session", required=True, help="папка captures/<session>")
+    lg.add_argument("--listen", default="0.0.0.0:5005")
+    lg.add_argument("--pace", type=float, default=0.0,
+                    help="пауза (сек) между чанками S->C, по умолчанию без пауз")
+
     args = ap.parse_args()
-    coro = replay_main(args) if args.mode == "replay" else serve_main(args)
+    coro = {"replay": replay_main, "serve": serve_main,
+            "login": login_main}[args.mode](args)
     try:
         asyncio.run(coro)
     except KeyboardInterrupt:
