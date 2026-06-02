@@ -81,6 +81,30 @@ def describe_frame(frame: "proto.Frame") -> str:
 # контрол-кадры (экраны) в темпе клиента. Логика наша, визуал из записи.
 # --------------------------------------------------------------------------
 
+# 1x1 прозрачный PNG — заглушка для ресурсов, которых нет в записи
+# (в записи их не было, т.к. устройство имело тёплый кэш).
+PLACEHOLDER_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c6300010000050001"
+    "0d0a2db40000000049454e44ae426082")
+
+
+def make_resource_frame(name: str, png: bytes) -> bytes:
+    """
+    Синтез кадра доставки ресурса (transport type=2):
+      [2][varlen][srcId=0:int32][op=0x808080+nchars:int32][name UTF-16BE][04 01][len:int32][png]
+    opcode кодирует длину имени (тип «строка длины N»).
+    """
+    nb = name.encode("utf-16-be")
+    op = (0x00808080 + len(name)) & 0xFFFFFFFF
+    body = (b"\x00\x00\x00\x00" + op.to_bytes(4, "big") + nb +
+            b"\x04\x01" + len(png).to_bytes(4, "big") + png)
+    out = bytearray([2])
+    proto.write_varint(out, len(body))
+    out += body
+    return bytes(out)
+
+
 def _req_resource_name(payload: bytes):
     """Из тела C->S кадра достаёт имя ресурса вида '!i7345' (UTF-16BE)."""
     toks, cur = [], []
@@ -146,7 +170,9 @@ async def game_handle(reader, writer, s2c, script, args):
                         state["res_hits"] += 1
                     elif name:
                         state["res_miss"] += 1
-                        print(f"  <- C[{state['recv']}] запрос ресурса {name} — НЕТ в индексе")
+                        if args.placeholder:
+                            writer.write(make_resource_frame(name, PLACEHOLDER_PNG))
+                            await writer.drain()
                     else:
                         print(f"  <- C[{state['recv']}] контрол: " + describe_frame(fr))
         except (asyncio.IncompleteReadError, ConnectionResetError):
@@ -655,6 +681,9 @@ def main():
     gm.add_argument("--listen", default="0.0.0.0:5005")
     gm.add_argument("--timeout", type=float, default=6.0,
                     help="макс ожидание перед след. контрол-кадром (сек)")
+    gm.add_argument("--no-placeholder", dest="placeholder", action="store_false",
+                    help="не слать заглушку на отсутствующие ресурсы")
+    gm.set_defaults(placeholder=True)
 
     args = ap.parse_args()
     coro = {"replay": replay_main, "serve": serve_main, "login": login_main,
