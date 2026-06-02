@@ -77,6 +77,131 @@ def describe_frame(frame: "proto.Frame") -> str:
 
 
 # --------------------------------------------------------------------------
+# Режим GAME — интерактивный: ресурсы по запросу (content-addressed),
+# контрол-кадры (экраны) в темпе клиента. Логика наша, визуал из записи.
+# --------------------------------------------------------------------------
+
+def _req_resource_name(payload: bytes):
+    """Из тела C->S кадра достаёт имя ресурса вида '!i7345' (UTF-16BE)."""
+    toks, cur = [], []
+    i, n = 0, len(payload)
+    while i + 1 < n:
+        cp = (payload[i] << 8) | payload[i + 1]
+        if 33 <= cp < 127:
+            cur.append(chr(cp)); i += 2
+        else:
+            if cur:
+                toks.append("".join(cur)); cur = []
+            i += 1
+    if cur:
+        toks.append("".join(cur))
+    for t in toks:
+        if t.startswith("!"):
+            return t
+    return None
+
+
+async def game_handle(reader, writer, s2c, script, args):
+    peer = writer.get_extra_info("peername")
+    print(f"\n[game] client connected: {peer}")
+    try:
+        hello = await reader.readexactly(2)
+    except asyncio.IncompleteReadError:
+        return
+    print(f"[game] HELLO={hello.hex()} -> {script['handshake']}")
+    writer.write(bytes.fromhex(script["handshake"]))
+    await writer.drain()
+
+    resources = script["resources"]      # name -> [off, len]
+    control = script["control"]          # [[off, len, gate], ...]
+    state = {"recv": 0, "res_hits": 0, "res_miss": 0}
+
+    async def client_reader():
+        buf = bytearray()
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                buf += data
+                while buf:
+                    if buf[0] == 0xFF:
+                        del buf[:1]
+                        continue
+                    rr = proto.ByteReader(bytes(buf))
+                    try:
+                        fr = proto.try_read_frame(rr)
+                    except ValueError:
+                        del buf[:1]
+                        continue
+                    if fr is None:
+                        break
+                    del buf[:rr.pos]
+                    state["recv"] += 1
+                    name = _req_resource_name(fr.payload)
+                    if name and name in resources:
+                        off, ln = resources[name]
+                        writer.write(s2c[off:off + ln])
+                        await writer.drain()
+                        state["res_hits"] += 1
+                    elif name:
+                        state["res_miss"] += 1
+                        print(f"  <- C[{state['recv']}] запрос ресурса {name} — НЕТ в индексе")
+                    else:
+                        print(f"  <- C[{state['recv']}] контрол: " + describe_frame(fr))
+        except (asyncio.IncompleteReadError, ConnectionResetError):
+            pass
+
+    ctask = asyncio.create_task(client_reader())
+
+    # Контрол-кадры (экраны) — в темпе клиента (gate по числу сообщений).
+    sent = 0
+    try:
+        for off, ln, gate in control:
+            waited = 0.0
+            while state["recv"] < gate and not ctask.done():
+                await asyncio.sleep(0.02)
+                waited += 0.02
+                if waited >= args.timeout:
+                    break
+            if ctask.done():
+                break
+            writer.write(s2c[off:off + ln])
+            await writer.drain()
+            sent += 1
+        print(f"[game] контрол-кадров отдано {sent}; ресурсов отдано "
+              f"{state['res_hits']} (промахов {state['res_miss']}); keepalive...")
+        while not ctask.done():
+            writer.write(b"\xff")
+            await writer.drain()
+            await asyncio.sleep(5)
+    except (ConnectionResetError, BrokenPipeError, ConnectionError):
+        print(f"[game] {peer} разорвал соединение")
+    await ctask
+    try:
+        writer.close()
+    except Exception:
+        pass
+    print(f"[game] {peer} отключился (ресурсов отдано {state['res_hits']})")
+
+
+async def game_main(args):
+    s2c = open(os.path.join(args.session, "s2c.bin"), "rb").read()
+    script = json.load(open(os.path.join(args.session, "script.json")))
+    host, port = args.listen.rsplit(":", 1)
+    server = await asyncio.start_server(
+        lambda r, w: game_handle(r, w, s2c, script, args),
+        host, int(port),
+    )
+    print(f"[game] listening on {args.listen}")
+    print(f"[game] ресурсов в индексе: {len(script['resources'])}, "
+          f"контрол-кадров: {len(script['control'])}, timeout={args.timeout}s")
+    print("[game] ресурсы — по запросу; экраны — в темпе клиента")
+    async with server:
+        await server.serve_forever()
+
+
+# --------------------------------------------------------------------------
 # Режим PLAY — lockstep-реплей: S->C кадры отдаются в темпе клиента
 # --------------------------------------------------------------------------
 
@@ -525,9 +650,15 @@ def main():
     pl.add_argument("--keep-hosts", action="store_true",
                     help="НЕ вырезать хост-лист (по умолчанию вырезается)")
 
+    gm = sub.add_parser("game", help="интерактивный: ресурсы по запросу + экраны")
+    gm.add_argument("--session", required=True, help="папка с s2c.bin и script.json")
+    gm.add_argument("--listen", default="0.0.0.0:5005")
+    gm.add_argument("--timeout", type=float, default=6.0,
+                    help="макс ожидание перед след. контрол-кадром (сек)")
+
     args = ap.parse_args()
-    coro = {"replay": replay_main, "serve": serve_main,
-            "login": login_main, "play": play_main}[args.mode](args)
+    coro = {"replay": replay_main, "serve": serve_main, "login": login_main,
+            "play": play_main, "game": game_main}[args.mode](args)
     try:
         asyncio.run(coro)
     except KeyboardInterrupt:
