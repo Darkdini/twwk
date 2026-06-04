@@ -24,3 +24,8 @@ captures_in/
 # Извлечённая графика клиента (сторонний контент)
 graphics_extract/
 *.zip
+
+# Сервер TLWK: контент клиента и состояние (не коммитим)
+server-tlwk/public/
+server-tlwk/state.json
+server-tlwk/node_modules/

@@ -1,0 +1,8 @@
+{
+  "name": "tlwk-server",
+  "version": "0.1.0",
+  "description": "Сервер игры TLWK по захваченному API (Vue-клиент tlwk.ru)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
