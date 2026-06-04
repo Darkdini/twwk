@@ -64,6 +64,31 @@ function jwtVerify(token) {
 // ---------- модель ----------
 const STARTING_RES = { gold: 1500, wood: 1500, stone: 1500, grain: 1500, iron: 1500, people: 200, energy: 0 };
 
+// каталог зданий из клиента (building_id -> level -> {cost_*, time_build, image_path, rating_plus})
+let CATALOG = {};
+try { CATALOG = JSON.parse(fs.readFileSync(path.join(__dirname, 'buildings.json'), 'utf8')); } catch (e) {}
+function bcost(bid, level) { const b = CATALOG[bid]; return b && (b[level] || b[String(level)]) || null; }
+function canAfford(c, k) {
+  return k && c.gold >= (k.cost_gold || 0) && c.wood >= (k.cost_wood || 0) && c.stone >= (k.cost_stone || 0)
+    && c.grain >= (k.cost_grain || 0) && c.iron >= (k.cost_iron || 0) && c.people >= (k.cost_population || 0);
+}
+function pay(c, k) {
+  c.gold -= k.cost_gold || 0; c.wood -= k.cost_wood || 0; c.stone -= k.cost_stone || 0;
+  c.grain -= k.cost_grain || 0; c.iron -= k.cost_iron || 0; c.people -= k.cost_population || 0;
+  c.rating = (c.rating || 1) + (k.rating_plus || 0);
+}
+// простой авто-прирост ресурсов со временем (наша логика, производства в клиенте нет)
+function regen(c) {
+  const now = Date.now();
+  if (!c._tick) { c._tick = now; return; }
+  const dt = (now - c._tick) / 1000;
+  if (dt < 1) return;
+  c._tick = now;
+  const rate = 1 + (c.buildings ? c.buildings.length : 0) * 0.5; // ед/сек
+  for (const r of ['gold', 'wood', 'stone', 'grain', 'iron'])
+    c[r] = Math.min(c.capacityWarehouse, Math.round(c[r] + dt * rate));
+}
+
 function makeCastle(cid, uid, race) {
   DB.castles[cid] = {
     cid, uid, type: 0, castle_name: 'Мой замок', rating: 1,
@@ -72,7 +97,7 @@ function makeCastle(cid, uid, race) {
     capacityWarehouse: 5000, capacityEnergy: 200, capacityHouse: 200, capacityMerchant: 0,
     pearl: 0, busy_dealers: 0, portalBonus: 0,
     // ратуша по умолчанию (building_id 1)
-    buildings: [{ building_id: 1, level: 1, in_progress: 0, time_left: 0,
+    buildings: [{ building_id: 1, level: 1, pid: 0, in_progress: 0, time_left: 0,
       build_start_time: '0000-00-00 00:00:00', time_build: 0,
       image_path: '/assets/images/game/wizard/buildings/cityhall_0.png', location: 'castle' }],
   };
@@ -214,40 +239,59 @@ const routes = {
   'POST /api/castle/res': (b, ctx) => {
     const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
+    regen(c); save();
     return ok({ resources: resourcesOf(c) });
   },
   'POST /api/castle/info': (b, ctx) => {
     const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
+    regen(c); save();
     return ok({ buildings: c.buildings, info: resourcesOf(c) });
   },
   'POST /api/building/prepare': (b, ctx) => {
     const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
-    const bld = c.buildings.find((x) => String(x.building_id) === String(b.pid));
+    regen(c);
+    const bld = c.buildings.find((x) => String(x.pid) === String(b.pid));
     const lvl = bld ? bld.level : 0;
-    return ok({ current: c.cid, item: { building_id: b.pid, level: lvl, next: lvl + 1,
-      is_completed: true, canTrain: false, canResurrect: false, can_build: true,
-      messages: [], isError: false, canUpgrade: true }, action: b.action || 'update' },
-      { mailbox: MAILBOX });
+    const bid = bld ? bld.building_id : null;
+    const next = lvl + 1;
+    const k = bid ? bcost(bid, next) : null;
+    const canUp = bld ? (lvl < (bid && CATALOG[bid] ? Object.keys(CATALOG[bid]).length : 10) && canAfford(c, k)) : false;
+    return ok({ current: c.cid, item: { building_id: bid || 0, level: lvl, next,
+      is_completed: true, canTrain: false, canResurrect: false, can_build: !bld,
+      messages: [], isError: false, canUpgrade: canUp,
+      cost: k || null }, action: b.action || 'update' }, { mailbox: MAILBOX });
   },
   'POST /api/building/create': (b, ctx) => {
     const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
-    if (!c.buildings.find((x) => String(x.building_id) === String(b.bid))) {
-      c.buildings.push({ building_id: Number(b.bid), level: 1, in_progress: 0, time_left: 0,
-        build_start_time: '0000-00-00 00:00:00', time_build: 0,
-        image_path: `/assets/images/game/wizard/buildings/b${b.bid}_0.png`, location: 'castle',
-        pid: b.pid });
-      save();
-    }
+    regen(c);
+    const bid = Number(b.bid);
+    if (c.buildings.find((x) => String(x.pid) === String(b.pid))) return err('Место занято');
+    const k = bcost(bid, 1);
+    if (!k) return err('Неизвестное здание');
+    if (!canAfford(c, k)) return err('Недостаточно ресурсов');
+    pay(c, k);
+    c.buildings.push({ building_id: bid, level: 1, pid: b.pid, in_progress: 0, time_left: 0,
+      build_start_time: '0000-00-00 00:00:00', time_build: 0,
+      image_path: k.image_path || `/assets/images/game/wizard/buildings/b_${bid}.png`, location: 'castle' });
+    save();
     return ok({ current: c.cid }, { mailbox: MAILBOX });
   },
   'POST /api/building/upgrade': (b, ctx) => {
     const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
-    const bld = c.buildings.find((x) => String(x.building_id) === String(b.pid));
-    if (bld) { bld.level++; save(); }
+    regen(c);
+    const bld = c.buildings.find((x) => String(x.pid) === String(b.pid));
+    if (!bld) return err('Здания нет');
+    const k = bcost(bld.building_id, bld.level + 1);
+    if (!k) return err('Максимальный уровень');
+    if (!canAfford(c, k)) return err('Недостаточно ресурсов');
+    pay(c, k);
+    bld.level++;
+    if (k.image_path) bld.image_path = k.image_path;
+    save();
     return ok({ current: c.cid }, { mailbox: MAILBOX });
   },
   'POST /api/map': (b, ctx) => {
