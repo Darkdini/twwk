@@ -210,6 +210,10 @@ const routes = {
   'POST /api/general': (b) => ok({ generals: [] }),
   'POST /api/general/assign': (b) => ok({}),
   'POST /api/reputation/list': (b) => ok({ list: [], page: 1 }),
+  'POST /api/forum': (b) => ok({ topics: [], page: 1 }),
+  'POST /api/chat/messages': (b) => ok({ messages: [] }),
+  'POST /api/shop/chest/info': (b) => ok({ chests: [], list: [] }),
+  'POST /api/debug/log': (b) => ok({}),
 };
 
 function userById(uid) {
