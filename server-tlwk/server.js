@@ -11,6 +11,22 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { makeCaptcha } = require('./captcha');
+
+// недавно выданные коды капчи (TTL 10 мин)
+let CAPTCHAS = [];
+function issueCaptcha() {
+  const { code, img } = makeCaptcha(4);
+  CAPTCHAS.push({ code, t: Date.now() });
+  if (CAPTCHAS.length > 50) CAPTCHAS.shift();
+  return img;
+}
+function captchaOk(input) {
+  if (!input) return false;
+  const now = Date.now();
+  CAPTCHAS = CAPTCHAS.filter((c) => now - c.t < 600000);
+  return CAPTCHAS.some((c) => c.code === String(input).trim());
+}
 
 const PORT = process.env.PORT || 7777;
 const SECRET = process.env.JWT_SECRET || 'tlwk-dev-secret-change-me';
@@ -99,13 +115,10 @@ function authCastle(req) {
 
 // ---------- роутер API ----------
 const routes = {
-  'POST /api/captcha': (b) => {
-    // 1x1 png-заглушка + код принимаем любой
-    const img = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-    return ok({ img });
-  },
+  'POST /api/captcha': (b) => ok({ img: issueCaptcha() }),
   'POST /api/register': (b) => {
     const login = (b.login || '').trim();
+    if (!captchaOk(b.captcha)) return err('Неверный код с картинки');
     if (!login || DB.users[login.toLowerCase()]) return err('Логин занят');
     const uid = ++DB.nextUid;
     const cid = newCastle(uid, b.race);
