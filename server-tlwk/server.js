@@ -64,8 +64,7 @@ function jwtVerify(token) {
 // ---------- модель ----------
 const STARTING_RES = { gold: 1500, wood: 1500, stone: 1500, grain: 1500, iron: 1500, people: 200, energy: 0 };
 
-function newCastle(uid, race) {
-  const cid = ++DB.nextCid;
+function makeCastle(cid, uid, race) {
   DB.castles[cid] = {
     cid, uid, type: 0, castle_name: 'Мой замок', rating: 1,
     ...STARTING_RES,
@@ -77,7 +76,24 @@ function newCastle(uid, race) {
       build_start_time: '0000-00-00 00:00:00', time_build: 0,
       image_path: '/assets/images/game/wizard/buildings/cityhall_0.png', location: 'castle' }],
   };
-  return cid;
+  return DB.castles[cid];
+}
+function newCastle(uid, race) { return makeCastle(++DB.nextCid, uid, race).cid; }
+
+// Замок по токену; если состояние сброшено — пересоздаём (устойчивость к rm state.json)
+function ensureCastle(ctx) {
+  if (!ctx || !ctx.cid) return null;
+  return DB.castles[ctx.cid] || makeCastle(ctx.cid, ctx.uid || (ctx.cid % 9000), ctx.race);
+}
+function ensureUser(ctx) {
+  if (!ctx) return null;
+  let u = userById(ctx.uid);
+  if (!u) {
+    u = { uid: ctx.uid, login: 'user' + ctx.uid, password: '', nickname: 'Player' + ctx.uid,
+      race: ctx.race || 'Орки', email: '', cid: ctx.cid, reputation: 10, rid: 1 };
+    DB.users['user' + ctx.uid] = u; save();
+  }
+  return u;
 }
 
 const MAILBOX = { messages: 0, reports: 0, news: 0, presents: 0, dialogs: 0,
@@ -181,11 +197,14 @@ const routes = {
   },
   'POST /api/user': (b, ctx) => {
     if (!ctx) return err('auth');
-    const u = userById(ctx.uid);
+    const u = ensureUser(ctx);
+    const c = ensureCastle(ctx);
     return ok({
       userId: ctx.uid, capital: ctx.cid,
-      info: { nickname: u ? u.nickname : '—', reputation: u ? u.reputation : 10, pearl: 0,
-        rasa: u ? u.race : 'Орки', alliance_id: -1, rid: u ? u.rid : 1, alliance: null,
+      gold: c ? c.gold : 0, wood: c ? c.wood : 0, stone: c ? c.stone : 0,
+      grain: c ? c.grain : 0, iron: c ? c.iron : 0, people: c ? c.people : 0,
+      info: { nickname: u.nickname, reputation: u.reputation, pearl: 0,
+        rasa: u.race, alliance_id: -1, rid: u.rid, alliance: null,
         empire_id: null, empire: null, race: 'ork', showLvl: false, showCastleName: false,
         premium: { premium_id: 0, premium_name: '', end_date: '', duration: 0 },
         permissions: -1, mis_limit: 10, mis_busy: 0, marriage: { free: true } },
@@ -193,17 +212,17 @@ const routes = {
     });
   },
   'POST /api/castle/res': (b, ctx) => {
-    const c = DB.castles[(b && b.cid) || (ctx && ctx.cid)];
+    const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
     return ok({ resources: resourcesOf(c) });
   },
   'POST /api/castle/info': (b, ctx) => {
-    const c = DB.castles[(b && b.cid) || (ctx && ctx.cid)];
+    const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
     return ok({ buildings: c.buildings, info: resourcesOf(c) });
   },
   'POST /api/building/prepare': (b, ctx) => {
-    const c = DB.castles[(b && b.cid) || (ctx && ctx.cid)];
+    const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
     const bld = c.buildings.find((x) => String(x.building_id) === String(b.pid));
     const lvl = bld ? bld.level : 0;
@@ -213,7 +232,7 @@ const routes = {
       { mailbox: MAILBOX });
   },
   'POST /api/building/create': (b, ctx) => {
-    const c = DB.castles[(b && b.cid) || (ctx && ctx.cid)];
+    const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
     if (!c.buildings.find((x) => String(x.building_id) === String(b.bid))) {
       c.buildings.push({ building_id: Number(b.bid), level: 1, in_progress: 0, time_left: 0,
@@ -225,7 +244,7 @@ const routes = {
     return ok({ current: c.cid }, { mailbox: MAILBOX });
   },
   'POST /api/building/upgrade': (b, ctx) => {
-    const c = DB.castles[(b && b.cid) || (ctx && ctx.cid)];
+    const c = ensureCastle(ctx);
     if (!c) return err('Нет замка');
     const bld = c.buildings.find((x) => String(x.building_id) === String(b.pid));
     if (bld) { bld.level++; save(); }
