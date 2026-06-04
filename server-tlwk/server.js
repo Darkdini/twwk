@@ -224,7 +224,10 @@ function serveStatic(req, res) {
   if (p === '/' || p === '/app/game' || p === '/app' || p === '/game') p = '/index.html';
   const file = findAsset(p);
   if (file) {
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+      'Access-Control-Allow-Origin': '*',
+    });
     fs.createReadStream(file).pipe(res);
     return;
   }
