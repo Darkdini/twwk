@@ -29,3 +29,6 @@ graphics_extract/
 server-tlwk/public/
 server-tlwk/state.json
 server-tlwk/node_modules/
+
+# Рабочая распаковка захвата
+tlwk_cap/
