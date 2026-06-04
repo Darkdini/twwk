@@ -223,9 +223,20 @@ function serveStatic(req, res) {
   let p = req.url.split('?')[0];
   if (p === '/' || p === '/app/game' || p === '/app' || p === '/game') p = '/index.html';
   const file = findAsset(p);
-  if (!file) { res.writeHead(404); res.end('not found'); return; }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
-  fs.createReadStream(file).pipe(res);
+  if (file) {
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    fs.createReadStream(file).pipe(res);
+    return;
+  }
+  // SPA-фоллбэк: маршруты без расширения (/app/castle, /app/register…) -> index.html
+  const hasExt = /\.[a-z0-9]{2,5}$/i.test(p);
+  const idx = path.join(PUBLIC, 'index.html');
+  if (!hasExt && fs.existsSync(idx)) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    fs.createReadStream(idx).pipe(res);
+    return;
+  }
+  res.writeHead(404); res.end('not found');
 }
 
 // ---------- сервер ----------
