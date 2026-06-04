@@ -83,6 +83,47 @@ function newCastle(uid, race) {
 const MAILBOX = { messages: 0, reports: 0, news: 0, presents: 0, dialogs: 0,
   obychenie: 1, rassilka: 0, medal: 0, chest: 8 };
 
+// ---------- генерация мира ----------
+const RACES = ['Орки', 'Эльфы', 'Люди', 'Гномы'];
+const CN = ['Папасная', 'Легион', 'Драккар', 'Северный форт', 'Цитадель', 'Оплот',
+  'Рубеж', 'Застава', 'Гнездо', 'Вольный город', 'Каменный город', 'Стальград'];
+const OA = ['Каменный оазис', 'Смешанный оазис', 'Лесной оазис', 'Железный оазис', 'Золотая жила'];
+const NK = ['Wagner', 'Legenda', 'Varg', 'Thorin', 'Eldar', 'Khan', 'Ragnar', 'Bjorn', 'Mira', 'Orion'];
+const pick = (a) => a[(Math.random() * a.length) | 0];
+
+function generateWorld() {
+  if (DB.world && DB.world.length) return;
+  // 1) реальный мир из записи (world.json), как в логах
+  try {
+    const w = JSON.parse(fs.readFileSync(path.join(__dirname, 'world.json'), 'utf8'));
+    const items = (w.items || []).filter((o) => o.t !== 0); // убрать чужой свой замок
+    if (items.length) {
+      DB.world = items;
+      DB.worldInfo = w.info || {};
+      save();
+      console.log(`[world] загружен из записи: ${items.length} объектов`);
+      return;
+    }
+  } catch (e) {}
+  // 2) фолбэк — случайная генерация
+  DB.world = [];
+  let cid = 100000;
+  for (let x = 48; x <= 96; x++) for (let y = 48; y <= 96; y++) {
+    if (Math.random() > 0.10) continue;
+    cid += 1 + ((Math.random() * 7) | 0);
+    if (Math.random() < 0.5) {
+      DB.world.push({ r: 200 + ((Math.random() * 3000) | 0), cid, uid: cid % 9000, t: 3,
+        cn: pick(CN), x, y, in_process: 0, def: null, batk: 0,
+        un: pick(NK) + ((Math.random() * 99) | 0), ur: pick(RACES), pr: 0, al: '', nk: 0, vk: null });
+    } else {
+      DB.world.push({ r: -900, cid, uid: cid % 9000, t: pick([12, 15, 21]),
+        cn: pick(OA), x, y, in_process: 0, def: null, batk: null,
+        un: 'Оазис', ur: pick(RACES), pr: 0, al: '', nk: 0, vk: null });
+    }
+  }
+  save();
+}
+
 function resourcesOf(c) {
   return {
     user_id: c.uid, type: c.type, castle_name: c.castle_name, rating: c.rating,
@@ -191,11 +232,31 @@ const routes = {
     return ok({ current: c.cid }, { mailbox: MAILBOX });
   },
   'POST /api/map': (b, ctx) => {
-    const c = ctx && DB.castles[ctx.cid];
-    const my = c ? [{ r: 8, cid: c.cid, uid: c.uid, t: 0, cn: c.castle_name, x: c.x_coord, y: c.y_coord }] : [];
-    return ok({ my, items: [] });
+    generateWorld();
+    const mine = Object.values(DB.castles).filter((c) => ctx && c.uid === ctx.uid);
+    const my = mine.map((c) => ({ r: c.rating, cid: c.cid, uid: c.uid, t: 0,
+      cn: c.castle_name, x: c.x_coord, y: c.y_coord }));
+    let items = DB.world || [];
+    // если клиент просит регион {x,y} (не init) — отдаём ближние
+    if (b && b.x != null && b.y != null && !b.init) {
+      const cx = +b.x, cy = +b.y, R = 20;
+      items = items.filter((o) => Math.abs(o.x - cx) <= R && Math.abs(o.y - cy) <= R);
+    }
+    return ok({ my, items });
   },
-  'POST /api/map/info': (b) => ok({ tile: null }),
+  'POST /api/map/info': (b, ctx) => {
+    generateWorld();
+    const tid = b && (b.tid || b.cid);
+    // реальные детали из записи
+    if (DB.worldInfo && DB.worldInfo[tid]) return ok({ item: DB.worldInfo[tid], trh_enable: true }, { mailbox: MAILBOX });
+    const o = (DB.world || []).find((w) => String(w.cid) === String(tid));
+    if (!o) return ok({ item: null }, { mailbox: MAILBOX });
+    return ok({ item: { castle_type: o.t, user_id: o.uid, castle_name: o.cn,
+      castle_rating: o.r < 0 ? 0 : o.r, x_coord: o.x, y_coord: o.y, castle_id: o.cid,
+      def: o.def, batk: o.batk, alliance_id: -1, in_process: 0, rasa: o.ur, type: 0,
+      nickname: o.un, aliance: o.al || '', empire_id: null, empire: null, prem: 0,
+      is_owner: false, missions: [] }, trh_enable: true }, { mailbox: MAILBOX });
+  },
   'POST /api/user/profile': (b) => ok({ profile: null }),
   'POST /api/user/instruction': (b) => ok({ steps: [] }),
   'POST /api/friends/list': (b) => ok({ list: [], page: 1 }),
