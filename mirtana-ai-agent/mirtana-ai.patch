@@ -1,0 +1,182 @@
+--- a/server.js
++++ b/server.js
+@@ -9,6 +9,11 @@
+ const os     = require('os');
+ const WS     = require('./ws');
+ const G      = require('./game');
++const AI     = require('./agent');   // встроенный автономный ИИ-агент (без внешних API)
++
++// История диалога с ИИ-агентом и анти-флуд (в памяти, по игроку)
++const aiHistory = new Map();   // username -> [{role,text}]
++const aiLast    = new Map();   // username -> timestamp последнего запроса
+ 
+ const PORT       = parseInt(process.env.PORT || '7777', 10);
+ const STATE_FILE = process.env.STATE_PATH || path.join(__dirname, 'state.json');
+@@ -1773,6 +1778,45 @@
+       const m = JSON.parse(raw);
+       if (m.type === 'ping') {
+         client.send(JSON.stringify({ type:'pong' }));
++      } else if (m.type === 'ai-chat' && username) {
++        // ── Запрос к встроенному ИИ-агенту «Мирта» (полностью локально) ──
++        const text = String(m.text || '').trim().slice(0, 600);
++        if (!text) return;
++        const now = Date.now();
++        const prev = aiLast.get(username) || 0;
++        if (now - prev < 1200) {                 // анти-флуд: не чаще 1 раза в 1.2с
++          client.send(JSON.stringify({ type:'ai-chat', msg:{ role:'assistant', t:now,
++            text:'Чуть медленнее — дай мне додумать предыдущий ответ. 🙂', steps:[] } }));
++          return;
++        }
++        aiLast.set(username, now);
++
++        const pl = STATE.players[username];
++        const hist = aiHistory.get(username) || [];
++        let result;
++        try {
++          result = AI.ask(text, {
++            username,
++            history: hist,
++            player: pl ? {
++              race:   pl.race,
++              res:    pl.res,
++              resMax: pl.resMax,
++              castle: pl.castle,
++              rating: G.calcRating ? G.calcRating(pl) : 0,
++            } : null,
++          });
++        } catch (e) {
++          result = { answer: 'Упс, я споткнулась при обдумывании. Попробуй переформулировать.', steps: [] };
++        }
++        // память диалога (последние 12 реплик)
++        hist.push({ role:'user', text }, { role:'assistant', text: result.answer });
++        while (hist.length > 12) hist.shift();
++        aiHistory.set(username, hist);
++
++        client.send(JSON.stringify({ type:'ai-chat', msg:{
++          role:'assistant', t: Date.now(), text: result.answer, steps: result.steps || [], topic: result.topic,
++        } }));
+       } else if (m.type === 'chat' && username) {
+         const text = String(m.text||'').trim().slice(0, 200);
+         if (!text) return;
+--- a/public/index.html
++++ b/public/index.html
+@@ -1348,6 +1348,7 @@
+         else if(r.txt&&r.txt.includes('Экспедиция вернулась')){pushNotif('🗺 Экспедиция',r.txt);}
+       }
+     }
++    else if(m.type==='ai-chat'){aiReceive(m.msg);}
+     else if(m.type==='chat'){appendChat(m.msg);if(!chatOpen){chatUnread++;const ub=$('#chat-bar-unread');if(ub){ub.textContent=chatUnread>99?'99+':chatUnread;ub.style.display='block';}}}
+     else if(m.type==='alliance-chat'){
+       appendAllianceChat(m.msg);
+@@ -3778,6 +3779,9 @@
+         <button id="pp-own-chat" style="background:rgba(25,12,3,.9);border:2px solid rgba(180,130,20,.5);border-radius:5px;padding:12px 4px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:inherit;">
+           <span style="font-size:32px;line-height:1;">💬</span><span style="font-size:9px;color:#c0a040;">Чат</span>
+         </button>
++        <button id="pp-own-ai" style="background:linear-gradient(180deg,rgba(20,10,40,.95),rgba(10,5,25,.95));border:2px solid rgba(120,90,220,.7);border-radius:5px;padding:12px 4px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:inherit;box-shadow:0 0 8px rgba(120,90,220,.35);">
++          <span style="font-size:32px;line-height:1;">🧠</span><span style="font-size:9px;color:#b0a0f0;">ИИ-советник</span>
++        </button>
+         <button id="pp-own-alliance" style="background:rgba(25,12,3,.9);border:2px solid rgba(180,130,20,.5);border-radius:5px;padding:12px 4px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:inherit;">
+           <span style="font-size:32px;line-height:1;">🛡</span><span style="font-size:9px;color:#c0a040;">Альянс</span>
+         </button>
+@@ -3936,6 +3940,7 @@
+     ed?.scrollIntoView({behavior:'smooth',block:'nearest'});
+   });
+   con.querySelector('#pp-own-chat')?.addEventListener('click',()=>{bg.remove();openChat();});
++  con.querySelector('#pp-own-ai')?.addEventListener('click',()=>{bg.remove();openAIChat();});
+   con.querySelector('#pp-own-alliance')?.addEventListener('click',()=>{bg.remove();showAllianceModal();});
+   con.querySelector('#pp-own-news')?.addEventListener('click',()=>{bg.remove();showNewsPanel();});
+   con.querySelector('#pp-own-achievements')?.addEventListener('click',async()=>{
+@@ -4569,6 +4574,93 @@
+   setTimeout(()=>$('#chat-inp')?.focus(),250);
+ }
+ function closeChat(){chatOpen=false;$('#chat-panel').classList.remove('open');}
++
++// ── ИИ-СОВЕТНИК «МИРТА» (встроенный автономный агент) ──────────────
++let aiPendingEl=null;
++function aiFmt(t){
++  return escH(String(t||'')).replace(/\*\*(.+?)\*\*/g,'<b style="color:#e8d8ff;">$1</b>').replace(/\n/g,'<br>');
++}
++function aiBubble(role,html,steps){
++  const wrap=document.createElement('div');
++  const me=role==='user';
++  wrap.style.cssText=`display:flex;flex-direction:column;align-items:${me?'flex-end':'flex-start'};`;
++  const b=document.createElement('div');
++  b.style.cssText=`max-width:86%;padding:9px 12px;border-radius:12px;font-size:13px;line-height:1.45;`+
++    (me?'background:linear-gradient(180deg,#4a3a08,#2a2200);border:1px solid rgba(200,160,50,.6);color:#f0e0b0;border-bottom-right-radius:3px;'
++       :'background:linear-gradient(180deg,#1a1235,#100a22);border:1px solid rgba(120,90,220,.5);color:#d8d0f0;border-bottom-left-radius:3px;');
++  b.innerHTML=me?escH(html):html;
++  wrap.appendChild(b);
++  if(!me&&steps&&steps.length){
++    const d=document.createElement('details');
++    d.style.cssText='margin-top:3px;max-width:86%;';
++    d.innerHTML=`<summary style="cursor:pointer;font-size:10px;color:#8a7ad0;list-style:none;">💭 ход мыслей (${steps.length})</summary>`+
++      `<div style="font-size:10px;color:#9a8ad8;padding:4px 8px;border-left:2px solid rgba(120,90,220,.4);margin-top:3px;">`+
++      steps.map((s,i)=>`${i+1}. ${escH(s)}`).join('<br>')+`</div>`;
++    wrap.appendChild(d);
++  }
++  return wrap;
++}
++function aiAppend(role,html,steps){
++  const box=$('#ai-msgs');if(!box)return null;
++  const el=aiBubble(role,html,steps);
++  box.appendChild(el);box.scrollTop=box.scrollHeight;
++  return el;
++}
++function aiSend(text){
++  const inp=$('#ai-inp');
++  text=(text!=null?text:(inp?inp.value:'')||'').trim();
++  if(!text)return;
++  if(!ws||ws.readyState!==1){toast('Нет соединения с сервером','err');return;}
++  aiAppend('user',text);
++  if(inp){inp.value='';inp.focus();}
++  // плейсхолдер «думаю…»
++  aiPendingEl=aiAppend('assistant','<span style="opacity:.7;">🧠 думаю…</span>');
++  ws.send(JSON.stringify({type:'ai-chat',text}));
++}
++function aiReceive(msg){
++  if(!msg)return;
++  const html=aiFmt(msg.text);
++  if(aiPendingEl){
++    const fresh=aiBubble('assistant',html,msg.steps);
++    aiPendingEl.replaceWith(fresh);aiPendingEl=null;
++    const box=$('#ai-msgs');if(box)box.scrollTop=box.scrollHeight;
++  } else {
++    aiAppend('assistant',html,msg.steps);
++  }
++}
++function openAIChat(){
++  let bg=$('#ai-bg');
++  if(bg){bg.style.display='flex';setTimeout(()=>$('#ai-inp')?.focus(),150);return;}
++  bg=document.createElement('div');bg.className='mbg';bg.id='ai-bg';
++  const box=document.createElement('div');box.className='mbox';
++  box.style.cssText='max-width:520px;width:94%;display:flex;flex-direction:column;max-height:88vh;';
++  box.innerHTML=`
++    <div class="mhead">🧠 Мирта — ИИ-советник<button class="xb" id="ai-x">✕</button></div>
++    <div id="ai-msgs" style="flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px;min-height:220px;background:rgba(8,4,16,.4);"></div>
++    <div id="ai-chips" style="display:flex;flex-wrap:wrap;gap:5px;padding:6px 8px 0;"></div>
++    <div style="display:flex;gap:6px;padding:8px;border-top:1px solid rgba(120,90,220,.3);">
++      <input type="text" id="ai-inp" placeholder="Спроси что угодно..." maxlength="600"
++        style="flex:1;min-width:0;background:rgba(0,0,0,.5);border:1px solid rgba(120,90,220,.5);border-radius:8px;color:#e0d8f5;font-size:13px;padding:9px 12px;font-family:inherit;outline:none;">
++      <button id="ai-send" style="padding:9px 16px;background:linear-gradient(180deg,#4a2a8a,#281550);border:1px solid rgba(150,110,240,.7);border-radius:8px;color:#e0d0ff;font-size:16px;font-weight:bold;cursor:pointer;">➤</button>
++    </div>`;
++  bg.appendChild(box);document.body.appendChild(bg);
++  bg.onclick=e=>{if(e.target===bg)bg.style.display='none';};
++  $('#ai-x').onclick=()=>{bg.style.display='none';};
++  $('#ai-send').onclick=()=>aiSend();
++  $('#ai-inp').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();aiSend();}};
++  // приветствие + быстрые подсказки
++  aiAppend('assistant',aiFmt('Привет! Я **Мирта** — твой ИИ-советник. Я живу прямо внутри игры (без интернета) и умею думать: считаю математику, перевожу величины, подсказываю по стратегии и отвечаю на вопросы из своей базы знаний. Спрашивай!'));
++  const chips=['Что мне строить дальше?','Сколько будет 15% от 200','Сколько планет в солнечной системе','5 км в мили'];
++  const cw=$('#ai-chips');
++  chips.forEach(c=>{
++    const b=document.createElement('button');
++    b.textContent=c;
++    b.style.cssText='background:rgba(40,25,70,.7);border:1px solid rgba(120,90,220,.4);border-radius:12px;color:#b8a8e8;font-size:10px;padding:4px 9px;cursor:pointer;';
++    b.onclick=()=>{aiSend(c);cw.style.display='none';};
++    cw.appendChild(b);
++  });
++  setTimeout(()=>$('#ai-inp')?.focus(),200);
++}
+ function initChat(){
+   $('#chat-close').onclick=closeChat;
+   $('#chat-send').onclick=sendChat;
