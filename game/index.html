@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Третий мир — Война Королей</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ═══════════ СТАРТОВЫЙ ЭКРАН ═══════════ -->
+<div id="start" class="start">
+  <div class="start-box">
+    <div class="logo">⚔️</div>
+    <h1>ТРЕТИЙ МИР</h1>
+    <div class="subtitle">ВОЙНА КОРОЛЕЙ</div>
+
+    <div id="resume" class="resume" style="display:none">
+      <button id="resumebtn" class="big-btn gold">▶ Продолжить игру</button>
+      <button id="newbtn" class="big-btn ghost">Новая игра</button>
+      <div class="or">— или создай новое королевство —</div>
+    </div>
+
+    <label class="fld">Имя короля
+      <input id="kingname" maxlength="20" placeholder="Король" value="">
+    </label>
+
+    <div class="rl">Выбери народ:</div>
+    <div id="races" class="races"></div>
+
+    <button id="startbtn" class="big-btn gold">🏰 Основать королевство</button>
+    <div class="credits">браузерный клон · открой и играй</div>
+  </div>
+</div>
+
+<!-- ═══════════ ИГРА ═══════════ -->
+<div id="app" class="app" style="display:none">
+  <header class="topbar">
+    <div class="brand">⚔️ <span>Война Королей</span></div>
+    <div id="resbar" class="resbar"></div>
+    <div class="who"><span id="whoami"></span>
+      <button id="menubtn" class="menubtn" title="Меню">☰</button></div>
+  </header>
+
+  <main id="screen" class="screen"></main>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="city">🏰<span>Город</span></button>
+    <button class="tab" data-tab="army">⚔️<span>Армия</span></button>
+    <button class="tab" data-tab="world">🗺️<span>Мир</span></button>
+    <button class="tab" data-tab="reports">📜<span>Отчёты</span></button>
+  </nav>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="js/data.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
